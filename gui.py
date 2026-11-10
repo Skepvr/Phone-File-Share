@@ -38,6 +38,38 @@ SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".localdrop.json")
 DEFAULT_FOLDER = os.path.join(os.path.expanduser("~"), "LocalDrop")
 QR_PX = 250
 
+THEMES = {
+    "light": {"bg": "#f5f6f8", "panel": "#ffffff", "fg": "#1d2330", "muted": "#6b7385",
+              "border": "#c8ccd4", "accent": "#3b6cf6", "accent_fg": "#ffffff",
+              "button": "#e6e9ef", "button_active": "#d8dce5", "select": "#3b6cf6",
+              "select_fg": "#ffffff", "disabled": "#a3a9b8", "placeholder": "#eef0f4"},
+    "dark": {"bg": "#12151c", "panel": "#1b2030", "fg": "#e8ebf2", "muted": "#8b93a7",
+             "border": "#2a3144", "accent": "#6b8cff", "accent_fg": "#0c0f16",
+             "button": "#262d42", "button_active": "#313a55", "select": "#6b8cff",
+             "select_fg": "#0c0f16", "disabled": "#5a6277", "placeholder": "#1b2030"},
+}
+
+
+def system_prefers_dark():
+    """Best-effort check of the operating system's dark mode setting."""
+    try:
+        if sys.platform.startswith("win"):
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+            return winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 0
+        if sys.platform == "darwin":
+            out = subprocess.run(["defaults", "read", "-g", "AppleInterfaceStyle"],
+                                 capture_output=True, text=True, timeout=2)
+            return "dark" in out.stdout.lower()
+        out = subprocess.run(
+            ["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
+            capture_output=True, text=True, timeout=2)
+        return "dark" in out.stdout.lower()
+    except Exception:
+        return False
+
 
 def fmt_size(n):
     units = ["B", "KB", "MB", "GB", "TB"]
@@ -143,6 +175,11 @@ class App:
         self.pin = tk.StringVar(value="%04d" % secrets.randbelow(10000))
         self.status = tk.StringVar(value="Stopped")
         self.url_text = tk.StringVar(value="")
+        saved_dark = saved.get("dark")
+        if saved_dark is None:  # first run: follow the system setting
+            saved_dark = system_prefers_dark()
+        self.dark = tk.BooleanVar(value=bool(saved_dark))
+        self._qr_target = None
 
         self.logq = queue.Queue()
         self.server = ShareServer(lambda msg: self.logq.put(msg))
@@ -150,7 +187,7 @@ class App:
 
         self._build()
         self._update_controls()
-        self._draw_qr(None)
+        self.apply_theme()
         self._poll_log()
         self._refresh_files()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -178,7 +215,7 @@ class App:
                             highlightbackground="#c8ccd4")
         self.qr.grid(row=2, column=0, columnspan=3)
         ttk.Label(left, text="Scan with your phone's camera",
-                  foreground="#6b7385").grid(row=3, column=0, columnspan=3, pady=(4, 0))
+                  style="Muted.TLabel").grid(row=3, column=0, columnspan=3, pady=(4, 0))
 
         url_row = ttk.Frame(left)
         url_row.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(6, 10))
@@ -210,6 +247,10 @@ class App:
         self.pin_entry = ttk.Entry(left, textvariable=self.pin, width=10)
         self.pin_entry.grid(row=9, column=1, sticky="w", padx=6, pady=(8, 0))
 
+        ttk.Checkbutton(left, text="Dark mode", variable=self.dark,
+                        command=self.toggle_dark).grid(
+            row=10, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
         # ---- right: files and activity
         head = ttk.Frame(right)
         head.grid(row=0, column=0, sticky="ew")
@@ -224,7 +265,7 @@ class App:
 
         ttk.Label(right, text="Files you add here can be downloaded on your phone. "
                               "Files sent from your phone appear here.",
-                  foreground="#6b7385", wraplength=420).grid(
+                  style="Muted.TLabel", wraplength=420).grid(
             row=1, column=0, sticky="w", pady=(2, 6))
 
         tree_frame = ttk.Frame(right)
@@ -255,6 +296,69 @@ class App:
                            highlightbackground="#c8ccd4")
         self.log.grid(row=0, column=0, sticky="ew")
 
+    def apply_theme(self):
+        t = THEMES["dark" if self.dark.get() else "light"]
+        self.theme = t
+        root = self.root
+        root.configure(bg=t["bg"])
+        style = ttk.Style(root)
+        style.theme_use("clam")  # the only built-in theme that honors custom colors everywhere
+        style.configure(".", background=t["bg"], foreground=t["fg"],
+                        fieldbackground=t["panel"], bordercolor=t["border"],
+                        lightcolor=t["bg"], darkcolor=t["bg"], troughcolor=t["panel"],
+                        focuscolor=t["accent"], insertcolor=t["fg"])
+        style.map(".", foreground=[("disabled", t["disabled"])])
+        style.configure("TLabel", background=t["bg"], foreground=t["fg"])
+        style.configure("Muted.TLabel", foreground=t["muted"])
+        style.configure("TFrame", background=t["bg"])
+        style.configure("TSeparator", background=t["border"])
+        style.configure("TButton", background=t["button"], foreground=t["fg"],
+                        bordercolor=t["border"], lightcolor=t["button"],
+                        darkcolor=t["button"], padding=5)
+        style.map("TButton",
+                  background=[("disabled", t["bg"]), ("active", t["button_active"])],
+                  foreground=[("disabled", t["disabled"])])
+        style.configure("TCheckbutton", background=t["bg"], foreground=t["fg"])
+        style.map("TCheckbutton", background=[("active", t["bg"])],
+                  indicatorbackground=[("selected", t["accent"]), ("!selected", t["panel"])],
+                  foreground=[("disabled", t["disabled"])])
+        style.configure("TEntry", fieldbackground=t["panel"], foreground=t["fg"],
+                        bordercolor=t["border"], lightcolor=t["border"],
+                        darkcolor=t["border"])
+        style.map("TEntry", fieldbackground=[("readonly", t["panel"]),
+                                             ("disabled", t["bg"])],
+                  foreground=[("disabled", t["disabled"])])
+        style.configure("TSpinbox", fieldbackground=t["panel"], foreground=t["fg"],
+                        background=t["button"], arrowcolor=t["fg"],
+                        bordercolor=t["border"], lightcolor=t["border"],
+                        darkcolor=t["border"])
+        style.map("TSpinbox", fieldbackground=[("disabled", t["bg"])],
+                  foreground=[("disabled", t["disabled"])])
+        style.configure("Treeview", background=t["panel"], fieldbackground=t["panel"],
+                        foreground=t["fg"], bordercolor=t["border"],
+                        lightcolor=t["panel"], darkcolor=t["panel"], rowheight=24)
+        style.map("Treeview", background=[("selected", t["select"])],
+                  foreground=[("selected", t["select_fg"])])
+        style.configure("Treeview.Heading", background=t["button"], foreground=t["fg"],
+                        bordercolor=t["border"], lightcolor=t["button"],
+                        darkcolor=t["button"], relief="flat")
+        style.map("Treeview.Heading", background=[("active", t["button_active"])])
+        style.configure("Vertical.TScrollbar", background=t["button"],
+                        troughcolor=t["bg"], bordercolor=t["bg"], arrowcolor=t["fg"],
+                        lightcolor=t["button"], darkcolor=t["button"])
+        style.map("Vertical.TScrollbar", background=[("active", t["button_active"])])
+
+        self.log.config(bg=t["panel"], fg=t["fg"], highlightbackground=t["border"],
+                        insertbackground=t["fg"])
+        self.qr.config(highlightbackground=t["border"])
+        self._draw_qr(self._qr_target)
+
+    def toggle_dark(self):
+        self.apply_theme()
+        settings = load_settings()
+        settings["dark"] = bool(self.dark.get())
+        save_settings(settings)
+
     def _update_controls(self):
         running = self.server.running
         idle = "disabled" if running else "normal"
@@ -267,18 +371,20 @@ class App:
         self.status.set("● Sharing: ready for your phone" if running else "○ Stopped")
 
     def _draw_qr(self, target):
+        self._qr_target = target
+        t = self.theme
         c = self.qr
         c.delete("all")
         if not target:
-            c.config(bg="#eef0f4")
+            c.config(bg=t["placeholder"])
             c.create_text(QR_PX // 2, QR_PX // 2, text="Press “Start sharing”\nto show the QR code",
-                          justify="center", fill="#6b7385")
+                          justify="center", fill=t["muted"])
             return
         try:
             m = share.make_qr(target)
         except ValueError:
-            c.config(bg="#eef0f4")
-            c.create_text(QR_PX // 2, QR_PX // 2, justify="center", fill="#6b7385",
+            c.config(bg=t["placeholder"])
+            c.create_text(QR_PX // 2, QR_PX // 2, justify="center", fill=t["muted"],
                           text="Address too long for a QR code.\nUse a shorter PIN.")
             return
         border = 3
@@ -331,7 +437,8 @@ class App:
         self._draw_qr(self.server.qr_target(pin))
         self._add_log(f"Sharing {folder}")
         self._add_log(f"Phone address: {url}" + ("  (PIN required)" if pin else ""))
-        save_settings({"folder": folder, "port": port, "use_pin": bool(pin)})
+        save_settings({"folder": folder, "port": port, "use_pin": bool(pin),
+                       "dark": bool(self.dark.get())})
         self._file_sig = None
         self._refresh_files()
 
